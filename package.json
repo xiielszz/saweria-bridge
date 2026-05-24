@@ -1,7 +1,7 @@
 {
-  "name": "saweria-bridge",
-  "version": "3.0.0",
-  "description": "Saweria Webhook bridge untuk Roblox",
+  "name": "sociabuzz-roblox-bridge",
+  "version": "4.0.0",
+  "description": "Sociabuzz Webhook bridge untuk Roblox",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
