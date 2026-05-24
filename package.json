@@ -1,14 +1,13 @@
 {
   "name": "saweria-bridge",
-  "version": "2.0.0",
-  "description": "Saweria SSE bridge untuk Roblox",
+  "version": "3.0.0",
+  "description": "Saweria Webhook bridge untuk Roblox",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "eventsource": "^2.0.2"
+    "express": "^4.18.2"
   },
   "engines": {
     "node": ">=16.0.0"
