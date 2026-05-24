@@ -1,14 +1,14 @@
 // ================================================================
-//  SAWERIA BRIDGE SERVER — WebSocket Edition
-//  Menggunakan streamKey resmi Saweria (tanpa cookie/login)
+//  SAWERIA BRIDGE SERVER — SSE Edition (Server-Sent Events)
+//  Endpoint resmi Saweria: api.saweria.co/stream
 //
-//  Deploy: Glitch.com / Railway.app / Render.com (gratis)
-//  Tech  : Node.js + Express + ws (WebSocket client)
+//  Deploy: Railway.app
+//  Tech  : Node.js + Express + eventsource
 // ================================================================
 
-const express   = require("express");
-const WebSocket = require("ws");
-const http      = require("http");
+const express     = require("express");
+const EventSource = require("eventsource");
+const http        = require("http");
 
 const app    = express();
 const server = http.createServer(app);
@@ -21,115 +21,126 @@ const PORT   = process.env.PORT || 3000;
 const STREAM_KEY = process.env.STREAM_KEY || "5ce6991001bcac3ed38990f430ff8247";
 const API_KEY    = process.env.API_KEY    || "roblox-saweria-secret-2025";
 
-const SAWERIA_WS = `wss://events.saweria.co/stream?streamKey=${STREAM_KEY}`;
+// URL SSE resmi Saweria
+const SAWERIA_SSE_URL = `https://api.saweria.co/stream?channel=donation.${STREAM_KEY}`;
 
 // ──────────────────────────────────────────────
-//  ANTRIAN DONASI (in-memory)
+//  STATE
 // ──────────────────────────────────────────────
 
-const pendingDonations = [];
-const donationLog      = [];
+const pendingDonations = [];   // Antrian untuk Roblox
+const donationLog      = [];   // Log 50 donasi terakhir
 let donationCounter    = 1;
-let wsStatus           = "disconnected";
-let wsRetries          = 0;
+let sseStatus          = "disconnected";
+let sseRetries         = 0;
+let esInstance         = null;
 
 // ──────────────────────────────────────────────
-//  WEBSOCKET CLIENT — Konek ke Saweria
+//  KONEKSI SSE KE SAWERIA
 // ──────────────────────────────────────────────
 
-function connectSaweriaWS() {
-    console.log(`[WS] Menghubungkan ke Saweria... (percobaan ${wsRetries + 1})`);
-    wsStatus = "connecting";
+function connectSaweriaSSE() {
+    console.log(`[SSE] Menghubungkan ke Saweria... (percobaan ${sseRetries + 1})`);
+    console.log(`[SSE] URL: ${SAWERIA_SSE_URL}`);
+    sseStatus = "connecting";
 
-    const ws = new WebSocket(SAWERIA_WS, {
+    // Tutup koneksi lama jika ada
+    if (esInstance) {
+        try { esInstance.close(); } catch(e) {}
+    }
+
+    esInstance = new EventSource(SAWERIA_SSE_URL, {
         headers: {
             "Origin":     "https://saweria.co",
-            "User-Agent": "Mozilla/5.0",
+            "Referer":    "https://saweria.co/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         }
     });
 
-    ws.on("open", () => {
-        wsStatus  = "connected";
-        wsRetries = 0;
-        console.log("[WS] Terhubung ke Saweria WebSocket!");
-    });
+    esInstance.onopen = () => {
+        sseStatus  = "connected";
+        sseRetries = 0;
+        console.log("[SSE] ✅ Terhubung ke Saweria!");
+    };
 
-    ws.on("message", (rawData) => {
+    // Saweria mengirim event bernama "donation"
+    esInstance.addEventListener("donation", (event) => {
         try {
-            const text  = rawData.toString();
-            const event = JSON.parse(text);
+            console.log("[SSE] Event donation:", event.data);
+            const parsed = JSON.parse(event.data);
 
-            let name    = null;
-            let amount  = null;
-            let message = "";
+            // Saweria format: { data: [{amount, donator, message, ...}] }
+            // atau langsung array
+            let donations = [];
+            if (parsed.data && Array.isArray(parsed.data)) {
+                donations = parsed.data;
+            } else if (Array.isArray(parsed)) {
+                donations = parsed;
+            } else if (parsed.amount !== undefined) {
+                donations = [parsed];
+            }
 
-            // Format 1: { type: "donation", data: { ... } }
-            if (event.type === "donation" && event.data) {
-                name    = event.data.donator_name || event.data.name || "Anonim";
-                amount  = parseInt(event.data.amount || 0, 10);
-                message = event.data.message || "";
-            }
-            // Format 2: { donator_name, amount, message }
-            else if (event.donator_name || event.name) {
-                name    = event.donator_name || event.name || "Anonim";
-                amount  = parseInt(event.amount || 0, 10);
-                message = event.message || "";
-            }
-            // Format 3: array of donations
-            else if (Array.isArray(event)) {
-                event.forEach(e => {
-                    const d = {
-                        id:      donationCounter++,
-                        name:    e.donator_name || e.name || "Anonim",
-                        amount:  parseInt(e.amount || 0, 10),
-                        message: e.message || "",
-                        ts:      new Date().toISOString(),
-                    };
-                    pendingDonations.push(d);
-                    donationLog.unshift(d);
+            donations.forEach((d) => {
+                const donation = {
+                    id:      donationCounter++,
+                    name:    d.donator || d.donator_name || d.name || "Anonim",
+                    amount:  parseInt(d.amount || 0, 10),
+                    message: d.message || "",
+                    ts:      new Date().toISOString(),
+                };
+
+                if (donation.amount > 0) {
+                    pendingDonations.push(donation);
+                    donationLog.unshift(donation);
                     if (donationLog.length > 50) donationLog.pop();
-                    console.log(`[Donasi] ${d.name} -> Rp ${d.amount} | "${d.message}"`);
-                });
-                return;
-            }
-            else {
-                console.log("[WS] Event tidak dikenal:", text.slice(0, 100));
-                return;
-            }
-
-            if (!name || amount === null) return;
-
-            const donation = {
-                id:      donationCounter++,
-                name,
-                amount,
-                message,
-                ts:      new Date().toISOString(),
-            };
-
-            pendingDonations.push(donation);
-            donationLog.unshift(donation);
-            if (donationLog.length > 50) donationLog.pop();
-
-            console.log(`[Donasi] ${donation.name} -> Rp ${donation.amount} | "${donation.message}"`);
+                    console.log(`[Donasi] ${donation.name} -> Rp ${donation.amount.toLocaleString("id-ID")} | "${donation.message}"`);
+                }
+            });
 
         } catch (err) {
-            console.error("[WS] Gagal parse:", err.message);
+            console.error("[SSE] Gagal parse donation event:", err.message, event.data);
         }
     });
 
-    ws.on("close", (code) => {
-        wsStatus = "disconnected";
-        wsRetries++;
-        const delay = Math.min(5000 * wsRetries, 30000);
-        console.log(`[WS] Terputus (${code}). Reconnect dalam ${delay / 1000}s...`);
-        setTimeout(connectSaweriaWS, delay);
-    });
+    // Tangkap semua event (termasuk default "message")
+    esInstance.onmessage = (event) => {
+        try {
+            if (!event.data || event.data === ":") return;
+            console.log("[SSE] Raw message:", event.data?.slice(0, 100));
 
-    ws.on("error", (err) => {
-        wsStatus = "error";
-        console.error("[WS] Error:", err.message);
-    });
+            const parsed = JSON.parse(event.data);
+
+            // Cek apakah ada data donasi
+            const d = parsed.data || parsed;
+            const name = d.donator || d.donator_name || d.name;
+            const amount = parseInt(d.amount || 0, 10);
+
+            if (name && amount > 0) {
+                const donation = {
+                    id:      donationCounter++,
+                    name,
+                    amount,
+                    message: d.message || "",
+                    ts:      new Date().toISOString(),
+                };
+                pendingDonations.push(donation);
+                donationLog.unshift(donation);
+                if (donationLog.length > 50) donationLog.pop();
+                console.log(`[Donasi via msg] ${donation.name} -> Rp ${donation.amount}`);
+            }
+        } catch (e) {
+            // Bukan JSON, abaikan (biasanya ping/heartbeat)
+        }
+    };
+
+    esInstance.onerror = (err) => {
+        sseStatus = "error";
+        sseRetries++;
+        const delay = Math.min(5000 * sseRetries, 30000);
+        console.error(`[SSE] Error / terputus. Reconnect dalam ${delay / 1000}s...`);
+        try { esInstance.close(); } catch(e) {}
+        setTimeout(connectSaweriaSSE, delay);
+    };
 }
 
 // ──────────────────────────────────────────────
@@ -154,8 +165,8 @@ function checkKey(req, res, next) {
 
 // ──────────────────────────────────────────────
 //  ENDPOINT: GET /donations
-//  Dipanggil SaweriaServer.lua setiap polling
-//  Ambil donasi pending lalu kosongkan antrian
+//  Dipanggil SaweriaServer.lua setiap 15 detik
+//  Ambil semua pending, lalu kosongkan antrian
 // ──────────────────────────────────────────────
 
 app.get("/donations", checkKey, (req, res) => {
@@ -165,27 +176,26 @@ app.get("/donations", checkKey, (req, res) => {
     res.json({
         donations: toSend,
         count:     toSend.length,
-        ws_status: wsStatus,
+        sse_status: sseStatus,
         ts:        new Date().toISOString(),
     });
 });
 
 // ──────────────────────────────────────────────
 //  ENDPOINT: GET /log
-//  Lihat 20 donasi terakhir
 // ──────────────────────────────────────────────
 
 app.get("/log", checkKey, (req, res) => {
     res.json({
-        donations: donationLog.slice(0, 20),
-        pending:   pendingDonations.length,
-        ws_status: wsStatus,
+        donations:  donationLog.slice(0, 20),
+        pending:    pendingDonations.length,
+        sse_status: sseStatus,
     });
 });
 
 // ──────────────────────────────────────────────
 //  ENDPOINT: GET /test
-//  Kirim donasi palsu untuk testing
+//  Simulasi donasi untuk testing Roblox
 // ──────────────────────────────────────────────
 
 const TEST_NAMES   = ["BudiGaming", "SitiOP", "SultanAqila", "JokiGacor", "RezaXL"];
@@ -212,13 +222,13 @@ app.get("/test", checkKey, (req, res) => {
 
 app.get("/health", (req, res) => {
     res.json({
-        status:     "ok",
-        ws_status:  wsStatus,
-        ws_retries: wsRetries,
-        pending:    pendingDonations.length,
-        logged:     donationLog.length,
-        uptime:     Math.floor(process.uptime()) + "s",
-        stream_key: STREAM_KEY.slice(0, 8) + "...",
+        status:      "ok",
+        sse_status:  sseStatus,
+        sse_retries: sseRetries,
+        pending:     pendingDonations.length,
+        logged:      donationLog.length,
+        uptime:      Math.floor(process.uptime()) + "s",
+        stream_key:  STREAM_KEY.slice(0, 8) + "...",
     });
 });
 
@@ -227,12 +237,13 @@ app.get("/health", (req, res) => {
 // ──────────────────────────────────────────────
 
 app.get("/", (req, res) => {
-    const c = wsStatus === "connected" ? "#6bcb77" : "#ff6b6b";
+    const c = sseStatus === "connected" ? "#6bcb77" : sseStatus === "connecting" ? "#ffd93d" : "#ff6b6b";
     res.send(`<html><body style="font-family:monospace;background:#0a0a14;color:#eee;padding:32px;line-height:2">
-        <h2>Saweria Bridge Server</h2>
-        <p>WebSocket: <b style="color:${c}">${wsStatus.toUpperCase()}</b></p>
-        <p>Pending   : <b>${pendingDonations.length}</b> donasi</p>
-        <p>Uptime    : ${Math.floor(process.uptime())}s</p>
+        <h2>⚡ Saweria Bridge Server</h2>
+        <p>SSE Status : <b style="color:${c}">${sseStatus.toUpperCase()}</b></p>
+        <p>Pending    : <b>${pendingDonations.length}</b> donasi</p>
+        <p>Logged     : <b>${donationLog.length}</b> donasi</p>
+        <p>Uptime     : ${Math.floor(process.uptime())}s</p>
         <hr style="border-color:#333;margin:16px 0">
         <p><code>GET /donations?key=API_KEY</code> — untuk Roblox polling</p>
         <p><code>GET /test?key=API_KEY</code>      — donasi test</p>
@@ -247,10 +258,12 @@ app.get("/", (req, res) => {
 
 server.listen(PORT, () => {
     console.log("================================================");
-    console.log("  Saweria Bridge Server AKTIF");
-    console.log(`  Port      : ${PORT}`);
-    console.log(`  StreamKey : ${STREAM_KEY.slice(0, 8)}...`);
-    console.log(`  API Key   : ${API_KEY}`);
+    console.log("  ⚡ Saweria Bridge Server AKTIF (SSE Mode)");
+    console.log(`  Port       : ${PORT}`);
+    console.log(`  StreamKey  : ${STREAM_KEY.slice(0, 8)}...`);
+    console.log(`  API Key    : ${API_KEY}`);
+    console.log(`  SSE URL    : ${SAWERIA_SSE_URL}`);
     console.log("================================================");
-    connectSaweriaWS();
+
+    connectSaweriaSSE();
 });
